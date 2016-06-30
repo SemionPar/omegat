@@ -33,6 +33,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -272,6 +274,13 @@ public class FindMatches {
                 near.attr = similarityData;
             }
         }
+        System.out.println("Accumulating time: " + accumulating.get() + " ms");
+        System.out.println("Combining time: " + combining.get() + " ms");
+        System.out.println("Scoring time: " + scoring.get() + " ms");
+        System.out.println("Tokenizing time: " + tokenizing.get() + " ms");
+        System.out.println("Calc similarity time: " + similarity.get() + " ms");
+        System.out.println("Token cache misses: " + tokCacheMisses.get());
+        System.out.println("Token cache hits: " + tokCacheHits.get());
 
         return result;
     }
@@ -286,6 +295,8 @@ public class FindMatches {
             NearString.MATCH_SOURCE comesFrom, final boolean fuzzy, final int penalty, final String tmxName,
             final String creator, final long creationDate, final String changer, final long changedDate,
             final List<TMXProp> props) {
+        long start = System.currentTimeMillis();
+
         // remove part that is to be removed prior to tokenize
         String realSource = source;
         String entryRemovedText = "";
@@ -306,7 +317,10 @@ public class FindMatches {
         Token[] candTokens = tokenizeStem(realSource);
 
         // First percent value - with stemming if possible
+        long simStart = System.currentTimeMillis();
+
         int similarityStem = FuzzyMatcher.calcSimilarity(distance, strTokensStem, candTokens);
+        similarity.addAndGet(System.currentTimeMillis() - simStart);
 
         similarityStem -= penalty;
         if (fuzzy) {
@@ -317,12 +331,20 @@ public class FindMatches {
 
         // check if we have chance by first percentage only
         if (!haveChanceToAdd(similarityStem, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
+            scoring.addAndGet(System.currentTimeMillis() - start);
+
+            accumulating.addAndGet(System.currentTimeMillis() - start);
+
             return;
         }
 
         Token[] candTokensNoStem = tokenizeNoStem(realSource);
         // Second percent value - without stemming
+        simStart = System.currentTimeMillis();
+
         int similarityNoStem = FuzzyMatcher.calcSimilarity(distance, strTokensNoStem, candTokensNoStem);
+        similarity.addAndGet(System.currentTimeMillis() - simStart);
+
         similarityNoStem -= penalty;
         if (fuzzy) {
             // penalty for fuzzy
@@ -332,12 +354,20 @@ public class FindMatches {
 
         // check if we have chance by first and second percentages
         if (!haveChanceToAdd(similarityStem, similarityNoStem, Integer.MAX_VALUE)) {
+            scoring.addAndGet(System.currentTimeMillis() - start);
+
+            accumulating.addAndGet(System.currentTimeMillis() - start);
+
             return;
         }
 
         Token[] candTokensAll = tokenizeAll(realSource);
         // Third percent value - with numbers, tags, etc.
+        simStart = System.currentTimeMillis();
+
         int simAdjusted = FuzzyMatcher.calcSimilarity(distance, strTokensAll, candTokensAll);
+        similarity.addAndGet(System.currentTimeMillis() - simStart);
+
         simAdjusted -= penalty;
         if (fuzzy) {
             // penalty for fuzzy
@@ -347,11 +377,19 @@ public class FindMatches {
 
         // check if we have chance by first, second and third percentages
         if (!haveChanceToAdd(similarityStem, similarityNoStem, simAdjusted)) {
+            scoring.addAndGet(System.currentTimeMillis() - start);
+
+            accumulating.addAndGet(System.currentTimeMillis() - start);
+
             return;
         }
 
+        scoring.addAndGet(System.currentTimeMillis() - start);
+
         addNearString(key, source, translation, comesFrom, fuzzy, similarityStem, similarityNoStem,
                 simAdjusted, null, tmxName, creator, creationDate, changer, changedDate, props);
+        accumulating.addAndGet(System.currentTimeMillis() - start);
+
     }
 
     /**
@@ -441,6 +479,14 @@ public class FindMatches {
         }
     }
 
+    AtomicLong accumulating = new AtomicLong();
+    AtomicLong combining = new AtomicLong();
+    AtomicLong scoring = new AtomicLong();
+    AtomicLong tokenizing = new AtomicLong();
+    AtomicLong similarity = new AtomicLong();
+    AtomicInteger tokCacheMisses = new AtomicInteger();
+    AtomicInteger tokCacheHits = new AtomicInteger();
+
     /*
      * Methods for tokenize strings with caching.
      */
@@ -449,35 +495,62 @@ public class FindMatches {
     Map<String, Token[]> tokenizeAllCache = new HashMap<String, Token[]>();
 
     public Token[] tokenizeStem(String str) {
+        long start = System.currentTimeMillis();
+
         Token[] result = tokenizeStemCache.get(str);
         if (result == null) {
+            tokCacheMisses.incrementAndGet();
+
             result = tok.tokenizeWords(str, ITokenizer.StemmingMode.MATCHING);
             tokenizeStemCache.put(str, result);
+        } else {
+            tokCacheHits.incrementAndGet();
+
         }
+        tokenizing.addAndGet(System.currentTimeMillis() - start);
+
         return result;
     }
 
     public Token[] tokenizeNoStem(String str) {
+        long start = System.currentTimeMillis();
+
         // No-stemming token comparisons are intentionally case-insensitive
         // for matching purposes.
         str = str.toLowerCase(srcLocale);
         Token[] result = tokenizeNoStemCache.get(str);
         if (result == null) {
+            tokCacheMisses.incrementAndGet();
+
             result = tok.tokenizeWords(str, ITokenizer.StemmingMode.NONE);
             tokenizeNoStemCache.put(str, result);
+        } else {
+            tokCacheHits.incrementAndGet();
+
         }
+        tokenizing.addAndGet(System.currentTimeMillis() - start);
+
         return result;
     }
 
     public Token[] tokenizeAll(String str) {
+        long start = System.currentTimeMillis();
+
         // Verbatim token comparisons are intentionally case-insensitive.
         // for matching purposes.
         str = str.toLowerCase(srcLocale);
         Token[] result = tokenizeAllCache.get(str);
         if (result == null) {
+            tokCacheMisses.incrementAndGet();
+
             result = tok.tokenizeVerbatim(str);
             tokenizeAllCache.put(str, result);
+        } else {
+            tokCacheHits.incrementAndGet();
+
         }
+        tokenizing.addAndGet(System.currentTimeMillis() - start);
+
         return result;
     }
 
